@@ -118,8 +118,8 @@ export async function POST(req: NextRequest) {
     currency: session.currency,
     expiresAt: session.expiresAt.toISOString(),
     // Square frontend SDK credentials (safe to expose)
-    squareAppId: process.env.NEXT_PUBLIC_SQUARE_APPLICATION_ID,
-    squareLocationId: process.env.NEXT_PUBLIC_SQUARE_LOCATION_ID,
-    squareEnvironment: process.env.NEXT_PUBLIC_SQUARE_ENVIRONMENT ?? "sandbox",
+    squareAppId: process.env.NEXT_PUBLIC_SQUARE_APP_ID,
+    squareLocationId: process.env.SQUARE_LOCATION_ID,
+    squareEnvironment: process.env.SQUARE_ENVIRONMENT ?? "sandbox",
   });
 }
