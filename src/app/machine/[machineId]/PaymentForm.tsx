@@ -1,20 +1,6 @@
 "use client";
 
-/**
- * PaymentForm — client-side payment component
- *
- * Handles the full customer flow:
- * 1. Fetch machine details
- * 2. Create payment session
- * 3. Load Square Web Payments SDK
- * 4. Show Apple Pay / Google Pay / card form
- * 5. Tokenise and send to backend
- * 6. Poll for machine start confirmation
- */
-
 import { useEffect, useRef, useState, useCallback } from "react";
-
-// ─── Types ────────────────────────────────────────────────────────────────
 
 interface Machine {
   id: string;
@@ -40,18 +26,18 @@ interface PaymentSession {
 }
 
 type FlowState =
-  | "loading"        // Fetching machine info
-  | "unavailable"    // Machine not available
-  | "ready"          // Ready to start payment
-  | "paying"         // Payment in progress
-  | "processing"     // Backend processing
-  | "starting"       // Command issued, waiting for ESP32
-  | "started"        // Relay pulsed — machine running!
-  | "failed"         // Payment failed
-  | "expired"        // Session expired
-  | "error";         // Unexpected error
+  | "loading"
+  | "unavailable"
+  | "ready"
+  | "paying"
+  | "sdkLoading"
+  | "processing"
+  | "starting"
+  | "started"
+  | "failed"
+  | "expired"
+  | "error";
 
-// ─── Square SDK types (minimal) ───────────────────────────────────────────
 declare global {
   interface Window {
     Square?: {
@@ -70,7 +56,7 @@ interface SquareCard {
   tokenize: () => Promise<{ status: string; token?: string; errors?: unknown[] }>;
   destroy: () => Promise<void>;
 }
-interface SquarePaymentRequest { /* opaque */ }
+interface SquarePaymentRequest { [key: string]: unknown }
 interface SquarePaymentRequestOptions {
   countryCode: string;
   currencyCode: string;
@@ -82,7 +68,6 @@ interface SquareWalletButton {
   destroy: () => Promise<void>;
 }
 
-// ─── Helper: format cents ─────────────────────────────────────────────────
 function formatPrice(cents: number, currency = "AUD"): string {
   return new Intl.NumberFormat("en-AU", {
     style: "currency",
@@ -95,22 +80,21 @@ function formatAmount(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
-// ─── Component ────────────────────────────────────────────────────────────
-
 export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
   const [flowState, setFlowState] = useState<FlowState>("loading");
   const [machine, setMachine] = useState<Machine | null>(null);
   const [session, setSession] = useState<PaymentSession | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  const [sdkReady, setSdkReady] = useState(false);
 
   const cardRef = useRef<SquareCard | null>(null);
   const applePayRef = useRef<SquareWalletButton | null>(null);
   const googlePayRef = useRef<SquareWalletButton | null>(null);
   const paymentsRef = useRef<SquarePayments | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sdkInitialized = useRef(false);
 
-  // ─── Step 1: Load machine ──────────────────────────────────────────────
-
+  // Step 1: Load machine
   useEffect(() => {
     fetch(`/api/machines/${machineSlug}`)
       .then((r) => r.json())
@@ -133,15 +117,14 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
       });
   }, [machineSlug]);
 
-  // ─── Step 2: Create session + load Square SDK ──────────────────────────
-
+  // Step 2: Create session (just the API call — SDK init is handled in useEffect below)
   const startPayment = useCallback(async () => {
     if (!machine) return;
     setFlowState("paying");
     setErrorMessage("");
+    setSdkReady(false);
+    sdkInitialized.current = false;
 
-    // Create payment session
-    let sess: PaymentSession;
     try {
       const res = await fetch("/api/payment-sessions", {
         method: "POST",
@@ -154,73 +137,104 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         setErrorMessage(data.error ?? "Could not start payment. Please try again.");
         return;
       }
-      sess = data as PaymentSession;
-      setSession(sess);
+      setSession(data as PaymentSession);
+      // SDK init will happen in the useEffect below once session state is set + DOM rendered
     } catch {
       setFlowState("ready");
       setErrorMessage("Network error. Please try again.");
-      return;
-    }
-
-    // Load Square Web Payments SDK
-    const sdkUrl =
-      sess.squareEnvironment === "production"
-        ? "https://web.squarecdn.com/v1/square.js"
-        : "https://sandbox.web.squarecdn.com/v1/square.js";
-
-    await loadScript(sdkUrl);
-
-    if (!window.Square) {
-      setFlowState("error");
-      setErrorMessage("Payment SDK failed to load. Please refresh and try again.");
-      return;
-    }
-
-    const payments = await window.Square.payments(sess.squareAppId, sess.squareLocationId);
-    paymentsRef.current = payments;
-
-    // Initialise card form
-    const card = await payments.card();
-    await card.attach("#sq-card-container");
-    cardRef.current = card;
-
-    // Initialise Apple Pay
-    try {
-      const paymentRequest = payments.paymentRequest({
-        countryCode: "AU",
-        currencyCode: sess.currency,
-        total: {
-          amount: formatAmount(sess.amountCents),
-          label: machine.name,
-        },
-      });
-      const applePay = await payments.applePay(paymentRequest);
-      await applePay.attach("#apple-pay-button");
-      applePayRef.current = applePay;
-    } catch {
-      // Apple Pay not available on this device — silently skip
-    }
-
-    // Initialise Google Pay
-    try {
-      const paymentRequest = payments.paymentRequest({
-        countryCode: "AU",
-        currencyCode: sess.currency,
-        total: {
-          amount: formatAmount(sess.amountCents),
-          label: machine.name,
-        },
-      });
-      const googlePay = await payments.googlePay(paymentRequest);
-      await googlePay.attach("#google-pay-button");
-      googlePayRef.current = googlePay;
-    } catch {
-      // Google Pay not available — silently skip
     }
   }, [machine]);
 
-  // ─── Step 3: Tokenise and charge ──────────────────────────────────────
+  // Step 3: Init Square SDK — runs AFTER session is set and DOM has rendered
+  useEffect(() => {
+    if (!session || flowState !== "paying" || sdkInitialized.current) return;
+    sdkInitialized.current = true;
 
+    const initSquare = async () => {
+      const sdkUrl =
+        session.squareEnvironment === "production"
+          ? "https://web.squarecdn.com/v1/square.js"
+          : "https://sandbox.web.squarecdn.com/v1/square.js";
+
+      try {
+        await loadScript(sdkUrl);
+      } catch {
+        setFlowState("error");
+        setErrorMessage("Payment SDK failed to load. Please refresh and try again.");
+        return;
+      }
+
+      if (!window.Square) {
+        setFlowState("error");
+        setErrorMessage("Payment SDK not available. Please refresh and try again.");
+        return;
+      }
+
+      if (!session.squareAppId || !session.squareLocationId) {
+        setFlowState("error");
+        setErrorMessage("Payment configuration error. Please contact support.");
+        console.error("Missing Square credentials:", { appId: session.squareAppId, locationId: session.squareLocationId });
+        return;
+      }
+
+      let payments: SquarePayments;
+      try {
+        payments = await window.Square.payments(session.squareAppId, session.squareLocationId);
+        paymentsRef.current = payments;
+      } catch (err) {
+        setFlowState("error");
+        setErrorMessage("Could not initialise payment form. Please refresh and try again.");
+        console.error("Square.payments() failed:", err);
+        return;
+      }
+
+      // Card form
+      try {
+        const card = await payments.card();
+        await card.attach("#sq-card-container");
+        cardRef.current = card;
+      } catch (err) {
+        setFlowState("error");
+        setErrorMessage("Could not load card form. Please refresh and try again.");
+        console.error("card.attach() failed:", err);
+        return;
+      }
+
+      // Apple Pay (optional — skip if unavailable)
+      try {
+        const paymentRequest = payments.paymentRequest({
+          countryCode: "AU",
+          currencyCode: session.currency,
+          total: { amount: formatAmount(session.amountCents), label: machine?.name ?? "Laundry" },
+        });
+        const applePay = await payments.applePay(paymentRequest);
+        await applePay.attach("#apple-pay-button");
+        applePayRef.current = applePay;
+      } catch {
+        // Not available on this device — fine
+      }
+
+      // Google Pay (optional — skip if unavailable)
+      try {
+        const paymentRequest = payments.paymentRequest({
+          countryCode: "AU",
+          currencyCode: session.currency,
+          total: { amount: formatAmount(session.amountCents), label: machine?.name ?? "Laundry" },
+        });
+        const googlePay = await payments.googlePay(paymentRequest);
+        await googlePay.attach("#google-pay-button");
+        googlePayRef.current = googlePay;
+      } catch {
+        // Not available on this device — fine
+      }
+
+      setSdkReady(true);
+    };
+
+    initSquare();
+  }, [session, flowState, machine]);
+
+  // Step 4: Tokenise and charge
   const handlePayWithCard = useCallback(async () => {
     if (!cardRef.current || !session) return;
     await submitPayment(() => cardRef.current!.tokenize());
@@ -262,7 +276,6 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
           return;
         }
 
-        // Payment succeeded — start polling for machine start
         setFlowState("starting");
         startPolling(session.sessionId);
       } catch {
@@ -273,11 +286,10 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
     [session]
   );
 
-  // ─── Step 4: Poll for machine start ───────────────────────────────────
-
+  // Step 5: Poll for machine start
   const startPolling = useCallback((sessionId: string) => {
     let attempts = 0;
-    const MAX_ATTEMPTS = 40; // 40 × 3s = 2 minutes
+    const MAX_ATTEMPTS = 40;
 
     pollIntervalRef.current = setInterval(async () => {
       attempts++;
@@ -306,7 +318,7 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
     }, 3000);
   }, []);
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
@@ -316,18 +328,15 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
     };
   }, []);
 
-  // ─── Render ───────────────────────────────────────────────────────────
-
   return (
     <div className="w-full max-w-sm mx-auto">
-      {/* Logo & Brand */}
       <div className="text-center mb-8">
         <div className="text-4xl mb-2">🧺</div>
         <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Laundry Day</h1>
         <p className="text-sm text-gray-500 mt-1">Tap. Pay. Wash.</p>
       </div>
 
-      {/* ── LOADING ── */}
+      {/* LOADING */}
       {flowState === "loading" && (
         <div className="text-center py-12">
           <div className="inline-block w-8 h-8 border-2 border-sky-500 border-t-transparent rounded-full wash-spin" />
@@ -335,7 +344,7 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         </div>
       )}
 
-      {/* ── UNAVAILABLE ── */}
+      {/* UNAVAILABLE */}
       {flowState === "unavailable" && machine && (
         <StateCard icon="🚫" title={machine.name} color="yellow">
           <p className="text-gray-600 text-sm text-center">{machine.unavailableReason}</p>
@@ -343,7 +352,7 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         </StateCard>
       )}
 
-      {/* ── READY ── */}
+      {/* READY */}
       {flowState === "ready" && machine && (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="bg-gradient-to-r from-sky-500 to-sky-600 px-6 py-5 text-white">
@@ -357,7 +366,6 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
               <div className="text-4xl">{machine.type === "WASHER" ? "🫧" : "♨️"}</div>
             </div>
           </div>
-
           <div className="px-6 py-5">
             <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-100">
               <div>
@@ -368,14 +376,15 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
                 {formatPrice(machine.priceCents, machine.currency)}
               </p>
             </div>
-
+            {errorMessage && (
+              <p className="text-red-500 text-sm text-center mb-3">{errorMessage}</p>
+            )}
             <button
               onClick={startPayment}
               className="w-full bg-sky-500 hover:bg-sky-600 active:bg-sky-700 text-white font-semibold py-4 px-6 rounded-xl text-base transition-colors"
             >
               Pay {formatPrice(machine.priceCents, machine.currency)}
             </button>
-
             <p className="text-xs text-gray-400 text-center mt-3">
               Apple Pay · Google Pay · Card accepted
             </p>
@@ -383,58 +392,72 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         </div>
       )}
 
-      {/* ── PAYING — Square SDK form ── */}
-      {flowState === "paying" && machine && session && (
+      {/* PAYING — Square SDK form (renders container immediately so SDK can attach) */}
+      {(flowState === "paying") && machine && (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="bg-gradient-to-r from-sky-500 to-sky-600 px-6 py-4 text-white flex items-center justify-between">
             <div>
               <p className="font-semibold">{machine.name}</p>
               <p className="text-sky-100 text-sm">Regular Wash</p>
             </div>
-            <p className="text-2xl font-bold">{formatPrice(session.amountCents, session.currency)}</p>
+            <p className="text-2xl font-bold">
+              {session ? formatPrice(session.amountCents, session.currency) : formatPrice(machine.priceCents, machine.currency)}
+            </p>
           </div>
 
           <div className="px-6 py-5 space-y-3">
-            {/* Wallet buttons (Apple Pay / Google Pay — rendered by Square SDK) */}
-            <div id="apple-pay-button" onClick={handlePayWithApplePay} />
-            <div id="google-pay-button" onClick={handlePayWithGooglePay} />
+            {!sdkReady && (
+              <div className="text-center py-6">
+                <div className="inline-block w-7 h-7 border-2 border-sky-500 border-t-transparent rounded-full wash-spin" />
+                <p className="text-gray-400 text-sm mt-3">Loading payment form…</p>
+              </div>
+            )}
 
-            <div className="relative flex items-center py-1">
-              <div className="flex-grow border-t border-gray-100" />
-              <span className="flex-shrink text-gray-400 text-xs px-3">or pay by card</span>
-              <div className="flex-grow border-t border-gray-100" />
-            </div>
+            {sdkReady && (
+              <>
+                <div id="apple-pay-button" onClick={handlePayWithApplePay} />
+                <div id="google-pay-button" onClick={handlePayWithGooglePay} />
+                <div className="relative flex items-center py-1">
+                  <div className="flex-grow border-t border-gray-100" />
+                  <span className="flex-shrink text-gray-400 text-xs px-3">or pay by card</span>
+                  <div className="flex-grow border-t border-gray-100" />
+                </div>
+              </>
+            )}
 
-            {/* Square card form */}
-            <div id="sq-card-container" className="w-full" />
+            {/* Card container always rendered so Square can attach to it */}
+            <div id="sq-card-container" className="w-full" style={{ display: sdkReady ? "block" : "none" }} />
 
             {errorMessage && (
               <p className="text-red-500 text-sm text-center py-1">{errorMessage}</p>
             )}
 
-            <button
-              onClick={handlePayWithCard}
-              className="w-full bg-sky-500 hover:bg-sky-600 active:bg-sky-700 text-white font-semibold py-4 rounded-xl text-base transition-colors"
-            >
-              Pay {formatPrice(session.amountCents, session.currency)}
-            </button>
-
-            <p className="text-xs text-gray-400 text-center">
-              🔒 Payments secured by Square. We never store your card details.
-            </p>
+            {sdkReady && (
+              <>
+                <button
+                  onClick={handlePayWithCard}
+                  className="w-full bg-sky-500 hover:bg-sky-600 active:bg-sky-700 text-white font-semibold py-4 rounded-xl text-base transition-colors"
+                >
+                  Pay {session ? formatPrice(session.amountCents, session.currency) : ""}
+                </button>
+                <p className="text-xs text-gray-400 text-center">
+                  🔒 Payments secured by Square. We never store your card details.
+                </p>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* ── PROCESSING ── */}
+      {/* PROCESSING */}
       {flowState === "processing" && (
         <StateCard icon="💳" title="Processing payment…" color="sky">
           <Spinner />
-          <p className="text-gray-500 text-sm text-center mt-2">Please don't close this page.</p>
+          <p className="text-gray-500 text-sm text-center mt-2">Please don&apos;t close this page.</p>
         </StateCard>
       )}
 
-      {/* ── STARTING ── */}
+      {/* STARTING */}
       {flowState === "starting" && (
         <StateCard icon="⚡️" title="Payment confirmed!" color="sky">
           <Spinner />
@@ -443,9 +466,9 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         </StateCard>
       )}
 
-      {/* ── STARTED ── */}
+      {/* STARTED */}
       {flowState === "started" && machine && (
-        <StateCard icon="✅" title="You're all set!" color="green">
+        <StateCard icon="✅" title="You&apos;re all set!" color="green">
           <p className="text-gray-700 text-center font-medium">{machine.name} is running!</p>
           <p className="text-gray-500 text-sm text-center mt-2">
             Your {machine.cycleDurationMinutes}-minute cycle has started.
@@ -456,22 +479,16 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
               {session && formatPrice(session.amountCents, session.currency)} charged
             </p>
           </div>
-          <p className="text-gray-400 text-xs text-center mt-4">
-            You can close this page. 🧺
-          </p>
+          <p className="text-gray-400 text-xs text-center mt-4">You can close this page. 🧺</p>
         </StateCard>
       )}
 
-      {/* ── FAILED ── */}
+      {/* FAILED */}
       {flowState === "failed" && (
         <StateCard icon="❌" title="Payment failed" color="red">
           <p className="text-gray-600 text-sm text-center">{errorMessage}</p>
           <button
-            onClick={() => {
-              setFlowState("ready");
-              setErrorMessage("");
-              setSession(null);
-            }}
+            onClick={() => { setFlowState("ready"); setErrorMessage(""); setSession(null); }}
             className="mt-4 w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
           >
             Try again
@@ -479,24 +496,20 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         </StateCard>
       )}
 
-      {/* ── EXPIRED ── */}
+      {/* EXPIRED */}
       {flowState === "expired" && (
         <StateCard icon="⏱" title="Session expired" color="yellow">
-          <p className="text-gray-600 text-sm text-center">Your payment session timed out. Please tap the tag again to start a new session.</p>
+          <p className="text-gray-600 text-sm text-center">Your payment session timed out. Please tap the tag again.</p>
         </StateCard>
       )}
 
-      {/* ── ERROR ── */}
+      {/* ERROR */}
       {flowState === "error" && (
         <StateCard icon="⚠️" title="Something went wrong" color="red">
           <p className="text-gray-600 text-sm text-center">{errorMessage || "An unexpected error occurred."}</p>
           {machine && (
             <button
-              onClick={() => {
-                setFlowState("ready");
-                setErrorMessage("");
-                setSession(null);
-              }}
+              onClick={() => { setFlowState("ready"); setErrorMessage(""); setSession(null); sdkInitialized.current = false; }}
               className="mt-4 w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
             >
               Try again
@@ -508,15 +521,8 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
   );
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────
-
-function StateCard({
-  icon, title, color, children
-}: {
-  icon: string;
-  title: string;
-  color: "sky" | "green" | "yellow" | "red";
-  children: React.ReactNode;
+function StateCard({ icon, title, color, children }: {
+  icon: string; title: string; color: "sky" | "green" | "yellow" | "red"; children: React.ReactNode;
 }) {
   const bgMap = {
     sky:    "from-sky-50 to-sky-100 border-sky-200",
@@ -541,18 +547,13 @@ function Spinner() {
   );
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
-
 function loadScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
     const script = document.createElement("script");
     script.src = src;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
     document.head.appendChild(script);
   });
 }
