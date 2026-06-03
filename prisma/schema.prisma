@@ -1,0 +1,181 @@
+// CycleOps — Prisma Schema
+// Database: PostgreSQL (Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Machines ──────────────────────────────────────────────────────────────
+
+model Machine {
+  id                   String   @id @default(cuid())
+  siteId               String   @default("site-1") @map("site_id")
+  name                 String                               // "Washer 1"
+  slug                 String   @unique                     // "washer-1" — matches NFC URL
+  type                 String                               // "WASHER" | "DRYER"
+  status               MachineStatus @default(AVAILABLE)
+  priceCents           Int      @map("price_cents")         // 400 = $4.00 AUD
+  currency             String   @default("AUD")
+  cycleDurationMinutes Int      @default(35) @map("cycle_duration_minutes")
+  relayDurationMs      Int      @default(500) @map("relay_duration_ms")
+  controllerId         String?  @map("controller_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  controller      Controller?      @relation(fields: [controllerId], references: [id])
+  paymentSessions PaymentSession[]
+  transactions    Transaction[]
+  machineCommands MachineCommand[]
+
+  @@map("machines")
+}
+
+enum MachineStatus {
+  AVAILABLE
+  PAYMENT_PENDING
+  STARTING
+  RUNNING
+  OFFLINE
+  DISABLED
+}
+
+// ─── Controllers (ESP32) ───────────────────────────────────────────────────
+
+model Controller {
+  id               String   @id @default(cuid())
+  name             String                           // "Controller-Washer-1"
+  authTokenHash    String   @map("auth_token_hash") // bcrypt hash of token
+  firmwareVersion  String?  @map("firmware_version")
+  lastSeenAt       DateTime? @map("last_seen_at")
+  status           ControllerStatus @default(OFFLINE)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  machines        Machine[]
+  machineCommands MachineCommand[]
+
+  @@map("controllers")
+}
+
+enum ControllerStatus {
+  ONLINE
+  OFFLINE
+}
+
+// ─── Payment Sessions ──────────────────────────────────────────────────────
+
+model PaymentSession {
+  id                String         @id @default(cuid())
+  machineId         String         @map("machine_id")
+  provider          String         @default("square")
+  providerSessionId String?        @unique @map("provider_session_id") // Square payment ID
+  amountCents       Int            @map("amount_cents")
+  currency          String         @default("AUD")
+  status            SessionStatus  @default(PENDING)
+  expiresAt         DateTime       @map("expires_at")
+  paidAt            DateTime?      @map("paid_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  machine        Machine         @relation(fields: [machineId], references: [id])
+  transaction    Transaction?
+  machineCommand MachineCommand?
+  webhookEvents  WebhookEvent[]
+
+  @@map("payment_sessions")
+}
+
+enum SessionStatus {
+  PENDING     // Awaiting payment
+  PAID        // Payment confirmed
+  FAILED      // Payment failed
+  EXPIRED     // Session timed out
+  CANCELLED   // Cancelled by system
+}
+
+// ─── Transactions ──────────────────────────────────────────────────────────
+
+model Transaction {
+  id                    String   @id @default(cuid())
+  machineId             String   @map("machine_id")
+  paymentSessionId      String   @unique @map("payment_session_id")
+  provider              String   @default("square")
+  providerTransactionId String   @unique @map("provider_transaction_id")
+  amountCents           Int      @map("amount_cents")
+  currency              String   @default("AUD")
+  status                String   // "COMPLETED" | "FAILED" | "REFUNDED"
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  machine        Machine        @relation(fields: [machineId], references: [id])
+  paymentSession PaymentSession @relation(fields: [paymentSessionId], references: [id])
+
+  @@map("transactions")
+}
+
+// ─── Machine Commands ──────────────────────────────────────────────────────
+
+model MachineCommand {
+  id               String        @id @default(cuid())
+  machineId        String        @map("machine_id")
+  controllerId     String?       @map("controller_id")
+  paymentSessionId String        @unique @map("payment_session_id")
+  commandType      String        @default("START")
+  status           CommandStatus @default(PENDING)
+  relayDurationMs  Int           @map("relay_duration_ms")
+  expiresAt        DateTime      @map("expires_at")      // Command expires if not claimed in time
+  requestedAt      DateTime      @default(now()) @map("requested_at")
+  claimedAt        DateTime?     @map("claimed_at")
+  executedAt       DateTime?     @map("executed_at")
+  resultMessage    String?       @map("result_message")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  machine        Machine        @relation(fields: [machineId], references: [id])
+  controller     Controller?    @relation(fields: [controllerId], references: [id])
+  paymentSession PaymentSession @relation(fields: [paymentSessionId], references: [id])
+
+  @@map("machine_commands")
+}
+
+enum CommandStatus {
+  PENDING    // Waiting for ESP32 to claim
+  CLAIMED    // ESP32 has acknowledged
+  EXECUTED   // Relay pulsed
+  FAILED     // Execution failed
+  EXPIRED    // Not claimed in time
+}
+
+// ─── Webhook Events ────────────────────────────────────────────────────────
+
+model WebhookEvent {
+  id               String    @id @default(cuid())
+  provider         String
+  providerEventId  String    @unique @map("provider_event_id") // Idempotency key
+  eventType        String    @map("event_type")
+  paymentSessionId String?   @map("payment_session_id")
+  processedAt      DateTime? @map("processed_at")
+  rawPayload       Json      @map("raw_payload")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  paymentSession PaymentSession? @relation(fields: [paymentSessionId], references: [id])
+
+  @@map("webhook_events")
+}
+
+// ─── Audit Logs ────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String   @map("entity_type")  // "machine" | "payment_session" | "command" | etc.
+  entityId   String   @map("entity_id")
+  action     String                         // "machine.start" | "session.create" | etc.
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("audit_logs")
+}

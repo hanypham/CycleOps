@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Square Web Payments SDK iframe styling */
+.sq-card-wrapper {
+  @apply w-full;
+}
+
+#sq-card-number,
+#sq-expiration-date,
+#sq-cvv,
+#sq-postal-code {
+  @apply w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-base;
+  height: 48px;
+}
+
+/* Apple Pay / Google Pay button containers */
+#apple-pay-button,
+#google-pay-button {
+  @apply w-full;
+}
+
+/* Pulse animation for machine starting state */
+@keyframes wash-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.wash-spin {
+  animation: wash-spin 1.5s linear infinite;
+}
