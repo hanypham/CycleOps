@@ -56,7 +56,7 @@ export async function POST(
       providerEventId: webhookResult.eventId,
       eventType: webhookResult.eventType,
       paymentSessionId: session?.id ?? null,
-      rawPayload: webhookResult.rawPayload,
+      rawPayload: JSON.parse(JSON.stringify(webhookResult.rawPayload)),
       processedAt: new Date(),
     },
   });
