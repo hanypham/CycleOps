@@ -95,7 +95,7 @@ export async function POST(
         entityType: "payment_session",
         entityId: session.id,
         action: "payment.failed",
-        metadata: { provider: session.provider, result },
+        metadata: JSON.parse(JSON.stringify({ provider: session.provider, result })),
       },
     });
 
