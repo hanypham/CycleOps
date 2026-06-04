@@ -86,6 +86,8 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
   const [session, setSession] = useState<PaymentSession | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [sdkReady, setSdkReady] = useState(false);
+  const [devMode, setDevMode] = useState(false);
+  const [testStatus, setTestStatus] = useState<string>("");
 
   const cardRef = useRef<SquareCard | null>(null);
   const applePayRef = useRef<SquareWalletButton | null>(null);
@@ -93,6 +95,12 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
   const paymentsRef = useRef<SquarePayments | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sdkInitialized = useRef(false);
+
+  // Detect ?dev=true in URL
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setDevMode(params.get("dev") === "true");
+  }, []);
 
   // Step 1: Load machine
   useEffect(() => {
@@ -117,6 +125,24 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
       });
   }, [machineSlug]);
 
+  // Dev: inject test command directly
+  const handleTestRelay = useCallback(async () => {
+    setTestStatus("Injecting test command…");
+    try {
+      const res = await fetch("/api/admin/test-relay?secret=cycleops-setup-2026", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setTestStatus(`Error: ${data.error ?? "unknown"}`);
+        return;
+      }
+      setTestStatus("✅ Command sent! Watch the relay…");
+      setFlowState("starting");
+      startPolling(data.sessionId);
+    } catch {
+      setTestStatus("Network error");
+    }
+  }, []);
+
   // Step 2: Create session (just the API call — SDK init is handled in useEffect below)
   const startPayment = useCallback(async () => {
     if (!machine) return;
@@ -138,7 +164,6 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         return;
       }
       setSession(data as PaymentSession);
-      // SDK init will happen in the useEffect below once session state is set + DOM rendered
     } catch {
       setFlowState("ready");
       setErrorMessage("Network error. Please try again.");
@@ -336,6 +361,20 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
         <p className="text-sm text-gray-500 mt-1">Tap. Pay. Wash.</p>
       </div>
 
+      {/* DEV MODE BANNER */}
+      {devMode && (flowState === "ready" || flowState === "unavailable") && (
+        <div className="mb-4 bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3">
+          <p className="text-yellow-700 text-xs font-semibold uppercase tracking-wide mb-2">🛠 Dev Mode</p>
+          <button
+            onClick={handleTestRelay}
+            className="w-full bg-yellow-400 hover:bg-yellow-500 text-yellow-900 font-semibold py-2.5 px-4 rounded-lg text-sm transition-colors"
+          >
+            🔴 Test Relay (no payment)
+          </button>
+          {testStatus && <p className="text-yellow-700 text-xs mt-2 text-center">{testStatus}</p>}
+        </div>
+      )}
+
       {/* LOADING */}
       {flowState === "loading" && (
         <div className="text-center py-12">
@@ -474,10 +513,7 @@ export default function PaymentForm({ machineSlug }: { machineSlug: string }) {
             Your {machine.cycleDurationMinutes}-minute cycle has started.
           </p>
           <div className="mt-4 bg-green-50 rounded-xl p-4 text-center">
-            <p className="text-green-600 text-xs font-medium uppercase tracking-wide">Payment successful</p>
-            <p className="text-green-800 text-sm mt-1">
-              {session && formatPrice(session.amountCents, session.currency)} charged
-            </p>
+            <p className="text-green-600 text-xs font-medium uppercase tracking-wide">Relay triggered</p>
           </div>
           <p className="text-gray-400 text-xs text-center mt-4">You can close this page. 🧺</p>
         </StateCard>
