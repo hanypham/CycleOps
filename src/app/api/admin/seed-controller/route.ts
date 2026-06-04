@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import { db } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   const secret = req.nextUrl.searchParams.get("secret");
@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    await prisma.controller.upsert({
+    await db.controller.upsert({
       where: { id: "ctrl-washer-1" },
       update: {
         authTokenHash:
@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    await prisma.machine.update({
+    await db.machine.update({
       where: { slug: "washer-1" },
       data: { controllerId: "ctrl-washer-1" },
     });
