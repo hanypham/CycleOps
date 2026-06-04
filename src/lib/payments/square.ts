@@ -175,9 +175,10 @@ export class SquareProvider implements PaymentProvider {
     if (!signatureKey) throw new Error("SQUARE_WEBHOOK_SIGNATURE_KEY is not set");
 
     // Square signature verification
+    // notificationUrl must match EXACTLY what is configured in Square Developer dashboard
     const signature = headers["x-square-hmacsha256-signature"] || headers["x-square-signature"];
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
-    const notificationUrl = `${appUrl}/api/payment-webhooks/square`;
+    const notificationUrl = `${appUrl}/api/webhooks/square`;
 
     const expectedSig = crypto
       .createHmac("sha256", signatureKey)
