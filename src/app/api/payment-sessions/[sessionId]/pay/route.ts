@@ -105,17 +105,19 @@ export async function POST(
     );
   }
 
-  // Payment succeeded — mark session paid, create transaction
-  await db.$transaction([
-    db.paymentSession.update({
-      where: { id: session.id },
-      data: {
-        status: "PAID",
-        paidAt: new Date(),
-        providerSessionId: result.providerTransactionId,
-      },
-    }),
-    db.transaction.create({
+  // Payment succeeded — mark session paid
+  await db.paymentSession.update({
+    where: { id: session.id },
+    data: {
+      status: "PAID",
+      paidAt: new Date(),
+      providerSessionId: result.providerTransactionId,
+    },
+  });
+
+  // Best-effort: create transaction record (don't crash if table isn't ready)
+  try {
+    await db.transaction.create({
       data: {
         machineId: session.machineId,
         paymentSessionId: session.id,
@@ -125,35 +127,51 @@ export async function POST(
         currency: result.currency,
         status: "COMPLETED",
       },
-    }),
-  ]);
+    });
+  } catch (txErr) {
+    console.error("[Pay] Could not create transaction record:", txErr);
+  }
 
-  await db.auditLog.create({
-    data: {
-      entityType: "payment_session",
-      entityId: session.id,
-      action: "payment.completed",
-      metadata: {
-        provider: session.provider,
-        providerTransactionId: result.providerTransactionId,
-        amountCents: result.amountCents,
-      },
-    },
-  });
-
-  // Issue machine start command
-  const startResult = await issueMachineStartCommand(session.id);
-  if (!startResult.success) {
-    console.error("[Pay] Machine start command failed after payment:", startResult.error);
-    // Payment succeeded but machine start failed — log for manual resolution
+  // Best-effort: audit log
+  try {
     await db.auditLog.create({
       data: {
         entityType: "payment_session",
         entityId: session.id,
-        action: "machine.start.failed",
-        metadata: { error: startResult.error },
+        action: "payment.completed",
+        metadata: {
+          provider: session.provider,
+          providerTransactionId: result.providerTransactionId,
+          amountCents: result.amountCents,
+        },
       },
     });
+  } catch (auditErr) {
+    console.error("[Pay] Could not write audit log:", auditErr);
+  }
+
+  // Issue machine start command (best-effort — don't let this crash the payment response)
+  let startResult = { success: false, commandId: undefined as string | undefined, error: "Not attempted" };
+  try {
+    startResult = await issueMachineStartCommand(session.id);
+    if (!startResult.success) {
+      console.error("[Pay] Machine start command failed after payment:", startResult.error);
+      // Try to log, but don't crash if audit_logs table isn't ready
+      try {
+        await db.auditLog.create({
+          data: {
+            entityType: "payment_session",
+            entityId: session.id,
+            action: "machine.start.failed",
+            metadata: { error: startResult.error },
+          },
+        });
+      } catch (auditErr) {
+        console.error("[Pay] Could not write audit log:", auditErr);
+      }
+    }
+  } catch (cmdErr) {
+    console.error("[Pay] issueMachineStartCommand threw:", cmdErr);
   }
 
   return NextResponse.json({
