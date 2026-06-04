@@ -151,7 +151,7 @@ export async function POST(
   }
 
   // Issue machine start command (best-effort — don't let this crash the payment response)
-  let startResult = { success: false, commandId: undefined as string | undefined, error: "Not attempted" };
+  let startResult: { success: boolean; commandId?: string; error?: string } = { success: false, commandId: undefined, error: "Not attempted" };
   try {
     startResult = await issueMachineStartCommand(session.id);
     if (!startResult.success) {
