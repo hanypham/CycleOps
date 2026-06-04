@@ -1,7 +1,7 @@
 /**
  * CycleOps ESP32 Controller Firmware
  * ====================================
- * Version: 1.0.1
+ * Version: 1.0.2
  *
  * What this does:
  *   1. Connects to Wi-Fi
@@ -21,7 +21,7 @@
  * Board Manager URL: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
  *
  * SAFETY NOTES:
- *   - Always use an opto-isolated relay module (e.g. HiLetgo 1-Channel 5V Relay)
+ *   - Always use an opto-isolated relay module (e.g. Keyestudio 5V Relay)
  *   - Test relay operation WITHOUT the washing machine first
  *   - Do NOT connect relay COM/NO to mains without verifying correct wiring
  *   - The relay should bridge the machine's start button contacts only
@@ -40,8 +40,8 @@
 enum ControllerState {
   STATE_WIFI_CONNECTING,
   STATE_REGISTERING,
-  STATE_IDLE,          // Connected, heartbeating, polling for commands
-  STATE_EXECUTING,     // Relay pulse in progress
+  STATE_IDLE,
+  STATE_EXECUTING,
 };
 
 ControllerState currentState = STATE_WIFI_CONNECTING;
@@ -50,22 +50,18 @@ ControllerState currentState = STATE_WIFI_CONNECTING;
 
 unsigned long lastHeartbeatMs = 0;
 unsigned long lastPollMs      = 0;
-unsigned long lastWifiRetryMs = 0;
 
 // ─── HTTP failure tracking ────────────────────────────────────────────────
-// If we get too many consecutive failures, force a full WiFi reconnect.
+
 int consecutiveHttpFailures = 0;
 const int MAX_HTTP_FAILURES = 5;
 
-// ─── Persistent SSL client — reused across all requests ───────────────────
-// Creating a new WiFiClientSecure on every request fragments heap over time.
-WiFiClientSecure secureClient;
-
 // ─── Safety flag: ensure command is only executed once ────────────────────
-// Even if we receive the same command multiple times, the relay fires once.
+
 String lastExecutedCommandId = "";
 
 // ─── Forward declarations ─────────────────────────────────────────────────
+
 bool connectWifi();
 bool registerController();
 bool sendHeartbeat();
@@ -92,16 +88,13 @@ void setup() {
 
   // Configure relay pin — start in inactive state
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_HIGH ? LOW : HIGH);  // Ensure relay is OFF
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_HIGH ? LOW : HIGH);
 
   // Status LED
   if (STATUS_LED_ENABLED) {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
   }
-
-  // Configure SSL client — skip cert verification for MVP
-  secureClient.setInsecure();
 
   currentState = STATE_WIFI_CONNECTING;
 }
@@ -113,7 +106,6 @@ void loop() {
 
   switch (currentState) {
 
-    // ── Wi-Fi ──────────────────────────────────────────────────────────────
     case STATE_WIFI_CONNECTING:
       if (connectWifi()) {
         Serial.println("[WiFi] Connected!");
@@ -126,7 +118,6 @@ void loop() {
       }
       break;
 
-    // ── Registration ───────────────────────────────────────────────────────
     case STATE_REGISTERING:
       if (registerController()) {
         Serial.println("[Controller] Registered successfully.");
@@ -141,22 +132,18 @@ void loop() {
       }
       break;
 
-    // ── Idle — heartbeat + poll ─────────────────────────────────────────────
     case STATE_IDLE:
-      // Check Wi-Fi health
       if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WiFi] Disconnected. Reconnecting...");
         currentState = STATE_WIFI_CONNECTING;
         break;
       }
 
-      // Heartbeat
       if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
         sendHeartbeat();
         lastHeartbeatMs = now;
       }
 
-      // Poll for commands
       if (now - lastPollMs >= POLL_INTERVAL_MS) {
         pollForCommand();
         lastPollMs = now;
@@ -164,9 +151,7 @@ void loop() {
 
       break;
 
-    // ── Executing — handled synchronously in pollForCommand ────────────────
     case STATE_EXECUTING:
-      // Should not reach here — execution is synchronous
       currentState = STATE_IDLE;
       break;
   }
@@ -253,9 +238,7 @@ void pollForCommand() {
   );
 
   if (statusCode != 200) {
-    if (statusCode != 0) {
-      Serial.printf("[Poll] HTTP %d\n", statusCode);
-    }
+    Serial.printf("[Poll] HTTP %d\n", statusCode);
     handleHttpFailure(statusCode);
     return;
   }
@@ -270,7 +253,6 @@ void pollForCommand() {
     return;
   }
 
-  // No command waiting
   if (doc["command"].isNull()) {
     return;
   }
@@ -287,14 +269,10 @@ void pollForCommand() {
   Serial.printf("[Command] Received: %s — type=%s relay=%dms\n",
     commandId, commandType, relayDurationMs);
 
-  // Safety: cap relay duration
   if (relayDurationMs > MAX_RELAY_PULSE_MS) {
-    Serial.printf("[Command] Relay duration %dms exceeds cap, capping at %dms\n",
-      relayDurationMs, MAX_RELAY_PULSE_MS);
     relayDurationMs = MAX_RELAY_PULSE_MS;
   }
 
-  // Safety: never execute the same command twice
   if (String(commandId) == lastExecutedCommandId) {
     Serial.printf("[Command] DUPLICATE — already executed %s, ignoring.\n", commandId);
     return;
@@ -316,23 +294,18 @@ void executeCommand(const String& commandId, int relayDurationMs) {
   Serial.printf("\n🔴 RELAY ON — pulsing for %dms\n", relayDurationMs);
   blinkLed(2, 100);
 
-  // ACTIVATE RELAY
   digitalWrite(RELAY_PIN, RELAY_ACTIVE_HIGH ? HIGH : LOW);
   delay(relayDurationMs);
-
-  // DEACTIVATE RELAY — always runs, even if delay is interrupted
   digitalWrite(RELAY_PIN, RELAY_ACTIVE_HIGH ? LOW : HIGH);
 
   Serial.println("⚪ RELAY OFF");
   blinkLed(3, 200);
 
-  // Record that this command has been executed (duplicate protection)
   lastExecutedCommandId = commandId;
 
-  // Report success
   bool reported = reportCommandResult(commandId, true, "Relay pulsed OK");
   if (!reported) {
-    Serial.println("[Command] Warning: failed to report result. Will retry on next cycle.");
+    Serial.println("[Command] Warning: failed to report result.");
   }
 
   currentState = STATE_IDLE;
@@ -365,7 +338,6 @@ bool reportCommandResult(const String& commandId, bool success, const String& me
 // ─── HTTP Failure Handler ─────────────────────────────────────────────────
 
 void handleHttpFailure(int statusCode) {
-  // Only count connection-level failures (negative codes), not HTTP errors
   if (statusCode < 0) {
     consecutiveHttpFailures++;
     Serial.printf("[Net] Connection failure #%d\n", consecutiveHttpFailures);
@@ -381,6 +353,9 @@ void handleHttpFailure(int statusCode) {
 }
 
 // ─── HTTP Helpers ─────────────────────────────────────────────────────────
+// Each request creates its own WiFiClientSecure and destroys it after.
+// This prevents the shared-client state corruption that causes -1 errors
+// after a few minutes of operation.
 
 String makeAuthHeader() {
   return String("Bearer ") + CONTROLLER_AUTH_TOKEN;
@@ -389,9 +364,12 @@ String makeAuthHeader() {
 int httpPost(const String& path, const String& body, String& responseOut) {
   if (WiFi.status() != WL_CONNECTED) return 0;
 
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip cert verification for MVP
+
   HTTPClient http;
   String url = String(API_BASE_URL) + path;
-  http.begin(secureClient, url);
+  http.begin(client, url);
   http.setTimeout(API_TIMEOUT_MS);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", makeAuthHeader());
@@ -401,6 +379,7 @@ int httpPost(const String& path, const String& body, String& responseOut) {
     responseOut = http.getString();
   }
   http.end();
+  client.stop();  // Fully close the TCP connection
 
   return statusCode;
 }
@@ -408,9 +387,12 @@ int httpPost(const String& path, const String& body, String& responseOut) {
 int httpGet(const String& path, String& responseOut) {
   if (WiFi.status() != WL_CONNECTED) return 0;
 
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip cert verification for MVP
+
   HTTPClient http;
   String url = String(API_BASE_URL) + path;
-  http.begin(secureClient, url);
+  http.begin(client, url);
   http.setTimeout(API_TIMEOUT_MS);
   http.addHeader("Authorization", makeAuthHeader());
 
@@ -419,6 +401,7 @@ int httpGet(const String& path, String& responseOut) {
     responseOut = http.getString();
   }
   http.end();
+  client.stop();  // Fully close the TCP connection
 
   return statusCode;
 }
