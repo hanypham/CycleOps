@@ -8,14 +8,21 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Expire all stuck PAYMENT_PENDING sessions
+    // Reset stuck machines from PAYMENT_PENDING / STARTING back to AVAILABLE
+    const resetMachines = await db.$executeRaw`
+      UPDATE machines
+      SET status = 'AVAILABLE', updated_at = NOW()
+      WHERE status IN ('PAYMENT_PENDING', 'STARTING')
+    `;
+
+    // Expire stuck PENDING payment sessions
     const expiredSessions = await db.$executeRaw`
       UPDATE payment_sessions
       SET status = 'EXPIRED', updated_at = NOW()
-      WHERE status = 'PAYMENT_PENDING'
+      WHERE status = 'PENDING'
     `;
 
-    // Expire all stuck PENDING commands
+    // Expire stuck PENDING commands
     const expiredCommands = await db.$executeRaw`
       UPDATE machine_commands
       SET status = 'EXPIRED'
@@ -25,6 +32,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       message: 'Machine reset successfully!',
+      resetMachines,
       expiredSessions,
       expiredCommands,
     });
