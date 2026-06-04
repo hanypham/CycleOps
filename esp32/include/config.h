@@ -24,7 +24,7 @@
 
 // ─── Relay Configuration ──────────────────────────────────────────────────
 #define RELAY_PIN              26
-#define RELAY_ACTIVE_HIGH      false        // Most opto-isolated relay modules are active LOW
+#define RELAY_ACTIVE_HIGH      true         // Keyestudio relay modules are active HIGH
 #define DEFAULT_RELAY_PULSE_MS 500
 #define MAX_RELAY_PULSE_MS     5000
 
